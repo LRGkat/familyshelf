@@ -21,9 +21,6 @@ def api(method,cred,**kw):
   if kw['steamid']==private:return {'response':{}}
   games=[{'appid':413150,'name':'Borrowed Stardew','playtime_forever':600,'playtime_2weeks':180},{'appid':620,'name':'Portal 2','playtime_forever':400,'playtime_2weeks':120}] if kw['steamid']==friend else []
   return {'response':{'total_count':len(games),'games':games}}
- if 'GetAchievementsProgress' in method:
-  if kw['steamid']==private:return {'response':{}}
-  return {'response':{'achievement_progress':[{'appid':a,'total':10,'unlocked':10 if a in [20,413150] else 7} for a in kw['appids']]}}
  if kw['steamid']==private:return {'response':{}}
  return {'response':{'game_count':1,'games':[{'appid':10 if kw['steamid']==sid else 20,'name':'Synthetic game','playtime_forever':120}]}}
 def family(token,progress):return f.normalize({'steamid':sid,'members':[{'steamid':sid}],'games':[]})
@@ -58,7 +55,7 @@ with patch.object(lib,'request_api',api),patch.object(f,'fetch_family',family),p
  assert page.evaluate('friendHub.workspace')=='family'
  assert 'friends' not in posts and 'prices' not in posts,posts # No front-end pipeline.
  page.locator('[data-friends-nav]').click()
- assert page.locator('.nav a').all_text_contents()==['家庭贡献','好友收藏','近两周游玩','全成就榜']
+ assert page.locator('.nav a').all_text_contents()==['家庭贡献','好友收藏','近两周游玩']
  assert page.locator('#fhTabSteamdb').count()==0 and 'SteamDB' not in page.locator('body').inner_text()
  assert len(page.evaluate('friendHub.debug().chosen'))==3
  assert page.evaluate('friendHub.debug().ranked[0].steamid')==friend
@@ -75,12 +72,12 @@ with patch.object(lib,'request_api',api),patch.object(f,'fetch_family',family),p
  assert row.locator('.rp-game strong').all_text_contents()==['Borrowed Stardew','Portal 2']
  assert row.locator('img[alt="Borrowed Stardew 游戏封面"]').get_attribute('src').endswith('/413150/header.jpg')
  assert '3 小时' in row.locator('.rp-game').first.inner_text()
- page.locator('#rpSearch').fill('Friend 1');assert page.locator('#recentSpace .rp-person').count()==1
- page.locator('#rpSearch').fill('');page.locator('#rpFilter').select_option('idle');assert page.locator('#recentSpace .rp-person').count()==1
- page.locator('#rpFilter').select_option('unavailable');assert page.locator('#recentSpace .rp-person').count()==1
- assert page.locator('#recentSpace .rp-time b').inner_text()=='—'
+ page.locator('#rpSearch').fill('Friend 1');assert page.locator('.rp-person').count()==1
+ page.locator('#rpSearch').fill('');page.locator('#rpFilter').select_option('idle');assert page.locator('.rp-person').count()==1
+ page.locator('#rpFilter').select_option('unavailable');assert page.locator('.rp-person').count()==1
+ assert page.locator('.rp-time b').inner_text()=='—'
  page.locator('#rpFilter').select_option('all')
- page.locator('#rpSelf').click();assert page.locator('#recentSpace .rp-person').count()==2
+ page.locator('#rpSelf').click();assert page.locator('.rp-person').count()==2
  page.locator('#rpSelf').click()
  # Opening survives a data render, supports keyboard collapse, and never loses details.
  page.evaluate('friendHub.render()')
@@ -92,34 +89,6 @@ with patch.object(lib,'request_api',api),patch.object(f,'fetch_family',family),p
   page.locator(f'details[data-rp-id="{friend}"] summary').click()
   assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
   page.locator(f'details[data-rp-id="{friend}"] summary').click()
- page.set_viewport_size({'width':1440,'height':1000})
- # Achievement progress runs after library/pricing with the same credential.
- page.locator('[data-space=achievements]').click()
- assert page.evaluate('friendHub.workspace')=='achievements'
- assert page.evaluate('achievementsUI.debug().ranked[0].steamid')==friend
- assert page.locator('#acRows .ac-person').first.locator('.rp-time b').inner_text()=='2'
- ac=page.locator(f'details[data-ac-id="{friend}"]')
- ac.locator('summary').click();ac.locator('.ac-game').first.wait_for()
- assert ac.locator('.ac-game').count()==2
- assert ac.locator('img[alt="Borrowed Stardew 游戏封面"]').get_attribute('src').endswith('/413150/header.jpg')
- assert '10 / 10' in ac.locator('.ac-game').first.inner_text()
- ac.locator('[data-ac-mode=progress]').click()
- assert ac.locator('.ac-game').count()==1 and '还差 3 枚' in ac.inner_text()
- page.evaluate('friendHub.render()')
- ac=page.locator(f'details[data-ac-id="{friend}"]')
- assert ac.get_attribute('open') is not None and ac.locator('.ac-game').count()==1
- ac.locator('summary').press('Enter');assert ac.get_attribute('open') is None
- page.locator('#acSearch').fill('Friend 1');assert page.locator('.ac-person').count()==1
- page.locator('#acSearch').fill('');page.locator('#acFilter').select_option('zero');assert page.locator('.ac-person').count()==1
- page.locator('#acFilter').select_option('unavailable');assert page.locator('.ac-person').count()==1
- assert page.locator('#acRows .rp-time b').inner_text()=='—'
- page.locator('#acFilter').select_option('all');page.locator('#acSelf').click();assert page.locator('.ac-person').count()==2
- page.locator('#acSelf').click()
- for width in [1440,390]:
-  page.set_viewport_size({'width':width,'height':1000 if width==1440 else 844})
-  page.locator(f'details[data-ac-id="{friend}"] summary').click()
-  assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
-  page.locator(f'details[data-ac-id="{friend}"] summary').click()
  page.set_viewport_size({'width':1440,'height':1000})
  page.locator('[data-space=friends]').click()
  before=calls.count('IFriendsListService/GetFriendsList/v1')
@@ -140,17 +109,19 @@ with patch.object(lib,'request_api',api),patch.object(f,'fetch_family',family),p
  assert page.locator('#fhRetry').is_hidden()
  for width in [1440,390]:
   page.set_viewport_size({'width':width,'height':1000 if width==1440 else 844})
-  for space in ['family','friends','recent','achievements']:
+  for space in ['family','friends','recent']:
    page.locator(f'[data-space={space}]').click();assert page.evaluate('document.documentElement.scrollWidth<=innerWidth'),(width,space)
   page.locator('[data-space=friends]').click()
   for tab in ['compare','discover','manage','rank']:
    page.locator(f'[data-fh-tab={tab}]').click();assert page.evaluate('document.documentElement.scrollWidth<=innerWidth'),(width,tab)
+ assert not any('GetAchievementsProgress' in method for method in calls),calls
  assert not errors,errors
  assert page.evaluate('localStorage.length')==0 and page.evaluate('sessionStorage.length')==0
  page.goto(url+'/#steamdb');page.wait_for_function('friendHub.workspace==="friends"');assert page.locator('#fhTabs').is_visible()
  page.goto(url+'/#recent');page.wait_for_function('friendHub.workspace==="recent"');assert page.locator('#recentSpace').is_visible()
- page.goto(url+'/#achievements');page.wait_for_function('friendHub.workspace==="achievements"');assert page.locator('#achievementsSpace').is_visible()
+ page.goto(url+'/#achievements');page.wait_for_function('friendHub.workspace==="friends"');assert page.locator('#fhTabs').is_visible()
+ assert page.locator('#achievementsSpace').count()==0 and page.locator('[data-space=achievements]').count()==0
  browser.close()
 for app,_,_ in list(cloud.SESSIONS.values()):cloud.dispose(app)
 for s in [api_server,static]:s.shutdown()
-print('PASS actual cloud HTTP + browser: login auto-sync with another-tab lock, manual sync/refresh, ranking/pricing, permission retry, recent game details, four sections and achievement details, mobile layout and no persistent storage')
+print('PASS actual cloud HTTP + browser: login auto-sync with another-tab lock, manual sync/refresh, ranking/pricing, permission retry, recent game details, three sections, mobile layout and no persistent storage')
