@@ -151,6 +151,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get('X-FamilyShelf-CSRF') != app.csrf:
             return self.send(403, {'error':'请求校验失败，请刷新网页。'})
         if path == '/api/login': ok, msg = app.start(True)
+        elif path == '/api/login/token': ok, msg = app.start_token(body.get('token'))
         elif path == '/api/refresh': ok, msg = app.start(False)
         elif path == '/api/disconnect':
             app.disconnect(); ok, msg = True, '已清除本次 Steam 认证。'

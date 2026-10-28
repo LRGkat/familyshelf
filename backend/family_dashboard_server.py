@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Local Steam Family dashboard. Credentials live only in process memory."""
 import argparse
+import base64
 import concurrent.futures
 import copy
 import csv
 import io
 import json
+import math
+import re
 import secrets
 import threading
 import time
@@ -101,6 +104,35 @@ class SteamFailure(Exception):
         self.auth = auth
 
 
+def parse_login_token(value):
+    """Check input shape only; Steam's API verifies actual authorization."""
+    if not isinstance(value, str) or not 1 <= len(value) <= 12000:
+        raise ValueError('请输入有效的 Steam 登录令牌。')
+    token = value.strip()
+    if token.startswith('{'):
+        try:
+            token = json.loads(token).get('webapi_token')
+        except (ValueError, AttributeError):
+            token = None
+    if isinstance(token, str) and token.lower().startswith('bearer '):
+        token = token[7:].strip()
+    if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', token):
+        raise ValueError('令牌格式不正确，请复制完整的 webapi_token，而非 API Key。')
+    try:
+        payload = token.split('.')[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
+        if not isinstance(claims, dict) or not re.fullmatch(r'\d{17}', str(claims.get('sub', ''))):
+            raise ValueError()
+        expiry = claims.get('exp')
+        if isinstance(expiry, bool) or not isinstance(expiry, (int, float)) or not math.isfinite(expiry):
+            raise ValueError()
+    except (ValueError, TypeError, OverflowError):
+        raise ValueError('无法识别令牌，请从 Steam 官方页面重新获取完整的 webapi_token。') from None
+    if expiry <= time.time():
+        raise ValueError('令牌已过期，请重新获取后登录。')
+    return token, str(claims['sub'])
+
+
 def api_call(method,params):
     url = f'{steam.API}/{method}/?' + urllib.parse.urlencode(params)
     req = urllib.request.Request(url,headers={'User-Agent':'FamilyShelf/1.0'})
@@ -182,11 +214,34 @@ class App:
             threading.Thread(target=self.run,args=(login,self.job_id,self.cancel),daemon=True).start()
             return True,self.message
 
-    def login(self,cancel):
+    def login(self,cancel,progress=None):
         try:
-            return self.browser_auth.request('token', cancel, self.progress)
+            return self.browser_auth.request('token', cancel, progress or self.progress)
         except AuthError as error:
             raise SteamFailure(str(error)) from None
+
+    def start_token(self, value):
+        try:
+            token, account = parse_login_token(value)
+        except ValueError as error:
+            return False, str(error)
+        with self.lock:
+            if self.phase == 'refresh' or self.friends.status()['job']['running']:
+                return False, '数据正在同步，请先等待完成或取消同步。'
+            self.cancel.set()
+            self.cancel_friend_auth()
+            self.browser_auth.reset()
+            # Do not reuse another account's friend credentials.
+            friend_account = self.friends.status()['data'].get('account_id')
+            if friend_account and friend_account != account:
+                self.friends.disconnect()
+            self.friend_auth['message'] = '已选择令牌登录；好友榜单可使用 SteamID 和 API Key 手动连接。'
+            self.job_id += 1
+            self.cancel = threading.Event()
+            self.phase = 'refresh'
+            self.message = '正在验证令牌并同步家庭库…'
+            threading.Thread(target=self.run, args=(False, self.job_id, self.cancel, token), daemon=True).start()
+            return True, self.message
 
     def start_friend_auth(self):
         with self.lock:
@@ -248,15 +303,19 @@ class App:
             self.friend_auth_cancel.set()
             self.friend_auth.update(running=False, phase='idle', message='已取消好友自动连接。')
 
-    def run(self,login,job,cancel):
+    def run(self,login,job,cancel,supplied_token=None):
+        def progress(message):
+            with self.lock:
+                if job == self.job_id and not cancel.is_set():
+                    self.message = message
         try:
-            token = self.login(cancel) if login else self.token
+            token = supplied_token if supplied_token is not None else self.login(cancel,progress) if login else self.token
             if cancel.is_set(): return
             with self.lock:
                 if job != self.job_id: return
                 self.token = token
                 self.phase = 'refresh'
-            data = fetch_family(token,self.progress)
+            data = fetch_family(token,progress)
             with self.lock:
                 if cancel.is_set() or job != self.job_id: return
                 self.data = data
