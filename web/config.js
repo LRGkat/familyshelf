@@ -1,2 +1,1 @@
-// This is a public API origin, never a Steam credential.
-window.FAMILYSHELF_CONFIG = { apiBase: '' };
+window.FAMILYSHELF_CONFIG = { apiBase: 'https://familyshelf-api.onrender.com' };

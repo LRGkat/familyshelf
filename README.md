@@ -2,6 +2,10 @@
 
 Steam 家庭贡献、好友游戏库价值与 SteamDB 价格榜单。
 
+看板：https://lrgkat.github.io/familyshelf/
+
+后端：https://familyshelf-api.onrender.com/health
+
 前端使用 GitHub Pages，Python API 和临时 Steam 登录浏览器运行在 Render。
 GitHub Pages 仅提供静态页面；把 Python 改写成 JavaScript 并不能让 Pages 运行后端。
 
