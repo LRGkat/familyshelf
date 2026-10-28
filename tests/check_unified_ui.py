@@ -15,7 +15,7 @@ def api(method,cred,**kw):
  calls.append(method)
  if 'GetFriendsList' in method:
   if mode['denied']:raise lib.FriendError('Steam 拒绝好友接口权限；可补充 API Key，无需再次登录。','permission')
-  return {'response':{'friendslist':{'friends':[{'ulfriendid':s,'efriendrelationship':3} for s in [friend,private]]}}}
+  return {'response':{'friendslist':{'friends':[{'ulfriendid':s,'efriendrelationship':3} for s in [friend,private,'103582791429521412']]}}}
  if 'GetPlayerLinkDetails' in method:return {'response':{'accounts':[{'public_data':{'steamid':s,'persona_name':'Friend '+s[-1]}} for s in kw['steamids']]}}
  if kw['steamid']==private:return {'response':{}}
  return {'response':{'game_count':1,'games':[{'appid':10 if kw['steamid']==sid else 20,'name':'Synthetic game','playtime_forever':120}]}}

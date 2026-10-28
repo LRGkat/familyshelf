@@ -34,7 +34,7 @@ with patch.object(lib.urllib.request,'urlopen',return_value=Response(headers={'x
 seen=[]
 def api(method,cred,**params):
     seen.append((method,cred))
-    if 'GetFriendsList' in method:return {'response':{'friendslist':{'friends':[{'ulfriendid':other,'efriendrelationship':3},{'ulfriendid':'76561198000000002','efriendrelationship':2}]}}}
+    if 'GetFriendsList' in method:return {'response':{'friendslist':{'friends':[{'ulfriendid':other,'efriendrelationship':3},{'ulfriendid':'103582791429521412','efriendrelationship':3},{'ulfriendid':'76561198000000002','efriendrelationship':2}]}}}
     if 'GetFriendList' in method:return {'friendslist':{'friends':[{'steamid':other}]}}
     if 'GetPlayerLinkDetails' in method:return {'response':{'accounts':[{'public_data':{'steamid':s,'persona_name':'Synthetic'},'private_data':{'account_name':'must-never-leak'}} for s in params['steamids']]}}
     if 'GetPlayerSummaries' in method:return {'response':{'players':[{'steamid':s,'personaname':'Synthetic'} for s in params['steamids'].split(',')]}}

@@ -3,7 +3,9 @@ import copy
 import base64
 import json
 import re
+import sys
 import threading
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +24,30 @@ def steam_id(value):
     if not match:
         raise ValueError('请输入 17 位 SteamID64，或含数字 ID 的 Steam 个人主页地址。')
     return match.group(1)
+
+
+def friend_entries(payload, token_auth):
+    """ClientFriendsList also contains clan relationships, not just people."""
+    envelope = payload.get('response') if token_auth else payload
+    friendslist = envelope.get('friendslist') if isinstance(envelope, dict) else None
+    if not isinstance(friendslist, dict):
+        raise FriendError('好友列表不可见或令牌权限不足；请补充 API Key 或检查隐私设置，无需再次登录。', 'permission')
+    entries = friendslist.get('friends', [])
+    if not isinstance(entries, list):
+        raise FriendError('Steam 返回的好友列表格式无效，请稍后重试。', 'list_format')
+    people = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if token_auth and str(entry.get('efriendrelationship')) != '3':
+            continue
+        try:
+            sid = steam_id(entry.get('ulfriendid' if token_auth else 'steamid'))
+        except ValueError:
+            # Groups, pending/removed accounts and invalid records are not users.
+            continue
+        people.append({'steamid': sid, 'friend_since': entry.get('friend_since')})
+    return people
 
 
 class FriendError(Exception):
@@ -69,8 +95,12 @@ def profiles(key, ids):
         try:
             if '.' in key:
                 payload = request_api('IPlayerService/GetPlayerLinkDetails/v1', key, steamids=batch)
-                for account in payload.get('response', {}).get('accounts', []):
-                    public = account.get('public_data', {})
+                response = payload.get('response') or {}
+                accounts = (response.get('accounts') or []) if isinstance(response, dict) else []
+                for account in accounts if isinstance(accounts, list) else []:
+                    public = account.get('public_data') if isinstance(account, dict) else None
+                    if not isinstance(public, dict):
+                        continue
                     person = {'steamid': str(public.get('steamid', '')), 'personaname': public.get('persona_name', '')}
                     digest = public.get('sha_digest_avatar')
                     if digest:
@@ -83,7 +113,10 @@ def profiles(key, ids):
                     result.append(person)
             else:
                 payload = request_api('ISteamUser/GetPlayerSummaries/v2', key, steamids=','.join(batch))
-                result.extend(payload.get('response', {}).get('players', []))
+                response = payload.get('response') or {}
+                players = response.get('players') if isinstance(response, dict) else None
+                if isinstance(players, list):
+                    result.extend(players)
         except FriendError as error:
             if error.code == 'rate_limit':
                 raise
@@ -113,10 +146,13 @@ def owned_games(key, sid):
         if not isinstance(appid, int) or isinstance(appid, bool) or appid <= 0 or appid in seen:
             raise FriendError('游戏编号无效或重复。')
         seen.add(appid)
-        clean.append({'appid': appid, 'name': str(game.get('name') or f'App {appid}')[:300],
-                      'playtime_forever': max(0, int(game.get('playtime_forever') or 0)),
-                      'playtime_2weeks': max(0, int(game.get('playtime_2weeks') or 0)),
-                      'rtime_last_played': max(0, int(game.get('rtime_last_played') or 0))})
+        try:
+            clean.append({'appid': appid, 'name': str(game.get('name') or f'App {appid}')[:300],
+                          'playtime_forever': max(0, int(game.get('playtime_forever') or 0)),
+                          'playtime_2weeks': max(0, int(game.get('playtime_2weeks') or 0)),
+                          'rtime_last_played': max(0, int(game.get('rtime_last_played') or 0))})
+        except (ValueError, TypeError, OverflowError):
+            raise FriendError('Steam 返回的游戏时长格式无效，保留上次快照。', 'library_format') from None
     return clean
 
 
@@ -188,19 +224,16 @@ class Friends:
         return True, '正在读取公开数据，您可以继续浏览。'
 
     def run(self, action, account, ids, key, cancel, region='cn'):
+        stage = 'list' if action == 'list' else 'profiles' if action == 'add' else 'libraries'
         try:
             if action == 'list':
                 if '.' in key:
                     payload = request_api('IFriendsListService/GetFriendsList/v1', key)
-                    friendslist = payload.get('response', {}).get('friendslist')
-                    items = ([{'steamid': p.get('ulfriendid')} for p in friendslist.get('friends', [])
-                              if p.get('efriendrelationship') == 3] if isinstance(friendslist, dict) else None)
                 else:
                     payload = request_api('ISteamUser/GetFriendList/v1', key, steamid=account, relationship='friend')
-                    items = payload.get('friendslist', {}).get('friends')
-                if not isinstance(items, list):
-                    raise FriendError('好友列表不可见或令牌权限不足；请补充 API Key 或检查隐私设置，无需再次登录。', 'permission')
+                items = friend_entries(payload, '.' in key)
                 ids = list(dict.fromkeys([account] + [steam_id(p.get('steamid')) for p in items]))[:2001]
+                stage = 'profiles'
                 info = profiles(key, ids)
                 with self.lock:
                     if cancel.is_set():
@@ -226,6 +259,7 @@ class Friends:
                                                         'games': [], 'status': 'pending', 'is_self': sid == account, 'manual': True})
                     self.save()
             failures = 0
+            stage = 'libraries'
             for index, sid in enumerate(ids if action != 'prices' else []):
                 if cancel.is_set():
                     break
@@ -252,6 +286,7 @@ class Friends:
                 if index + 1 < len(ids) and cancel.wait(.35):
                     break
             if not cancel.is_set() and self.on_synced:
+                stage = 'pricing'
                 self.on_synced(ids, region, cancel)
             with self.lock:
                 if cancel is self.cancel and not cancel.is_set():
@@ -260,10 +295,18 @@ class Friends:
             with self.lock:
                 if cancel is self.cancel and not cancel.is_set():
                     self.job.update(phase='error', message=str(error), error=str(error), error_code=error.code)
-        except Exception:
+        except Exception as error:
+            # Never log exception messages/locals: they can contain credential URLs.
+            trace = traceback.extract_tb(error.__traceback__)
+            frames = ','.join(f'{frame.name}:{frame.lineno}' for frame in trace
+                              if frame.filename == __file__)
+            diagnostic = f'{stage}-{type(error).__name__}'
+            print(f'friends_sync_failure code={diagnostic} frames={frames}', file=sys.stderr, flush=True)
+            label = {'list':'读取好友列表', 'profiles':'读取好友资料', 'libraries':'同步游戏库', 'pricing':'补全商店估值'}[stage]
+            message = f'{label}遇到数据处理错误（{diagnostic}），已保留已完成的数据。'
             with self.lock:
                 if cancel is self.cancel and not cancel.is_set():
-                    self.job.update(phase='error', message='同步未完成，已保留上次数据。请稍后重试。', error='同步未完成，请重试。', error_code='upstream')
+                    self.job.update(phase='error', message=message, error=message, error_code=diagnostic)
         finally:
             with self.lock:
                 if cancel is self.cancel:
