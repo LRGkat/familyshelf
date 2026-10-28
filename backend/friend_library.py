@@ -1,5 +1,6 @@
 """Steam public friends/libraries; Credentials stay in process memory."""
 import copy
+import base64
 import json
 import re
 import threading
@@ -24,24 +25,35 @@ def steam_id(value):
 
 
 class FriendError(Exception):
-    pass
+    def __init__(self, message, code='upstream'):
+        super().__init__(message)
+        self.code = code
 
 
 def request_api(method, key, **params):
+    if '.' in key and method.startswith(('IPlayerService/', 'IFriendsListService/')):
+        params = {'input_json': json.dumps(params)}
+    else:
+        params = {k: str(v).lower() if isinstance(v, bool) else v for k, v in params.items()}
     params['access_token' if '.' in key else 'key'] = key
     req = urllib.request.Request(f'{steam.API}/{method}/?' + urllib.parse.urlencode(params),
                                  headers={'User-Agent': 'FamilyShelf/2.0'})
     try:
         with urllib.request.urlopen(req, timeout=22, context=steam.api_tls_context()) as response:
+            eresult = response.headers.get('x-eresult', '1')
+            if eresult != '1':
+                if eresult in ('5', '15', '27'):
+                    raise FriendError('Steam 拒绝好友接口权限；可补充 API Key，无需再次登录。', 'permission')
+                raise FriendError('Steam 暂未返回好友数据，请稍后重试。')
             result = json.load(response)
         if not isinstance(result, dict):
             raise ValueError()
         return result
     except urllib.error.HTTPError as error:
         if error.code == 429:
-            raise FriendError('Steam 请求限流，请稍后重试。') from None
+            raise FriendError('Steam 请求限流，请稍后重试。', 'rate_limit') from None
         if error.code in (401, 403):
-            raise FriendError('Steam 未授权读取此数据：可补充 API Key，并检查好友列表 / 游戏详情的隐私设置；无需重复登录。') from None
+            raise FriendError('Steam 未授权读取此数据：可补充 API Key，并检查好友列表 / 游戏详情的隐私设置；无需重复登录。', 'permission') from None
         raise FriendError(f'Steam 接口暂不可用（HTTP {error.code}）。') from None
     except FriendError:
         raise
@@ -53,9 +65,29 @@ def request_api(method, key, **params):
 def profiles(key, ids):
     result = []
     for offset in range(0, len(ids), 100):
-        payload = request_api('ISteamUser/GetPlayerSummaries/v2', key,
-                              steamids=','.join(ids[offset:offset + 100]))
-        result.extend(payload.get('response', {}).get('players', []))
+        batch = ids[offset:offset + 100]
+        try:
+            if '.' in key:
+                payload = request_api('IPlayerService/GetPlayerLinkDetails/v1', key, steamids=batch)
+                for account in payload.get('response', {}).get('accounts', []):
+                    public = account.get('public_data', {})
+                    person = {'steamid': str(public.get('steamid', '')), 'personaname': public.get('persona_name', '')}
+                    digest = public.get('sha_digest_avatar')
+                    if digest:
+                        try:
+                            digest = base64.b64decode(digest, validate=True).hex()
+                            if len(digest) == 40:
+                                person['avatarfull'] = f'https://avatars.steamstatic.com/{digest}_full.jpg'
+                        except (ValueError, TypeError):
+                            pass
+                    result.append(person)
+            else:
+                payload = request_api('ISteamUser/GetPlayerSummaries/v2', key, steamids=','.join(batch))
+                result.extend(payload.get('response', {}).get('players', []))
+        except FriendError as error:
+            if error.code == 'rate_limit':
+                raise
+            # A missing avatar/profile must not block every game library.
     return {str(p['steamid']): {k: p[k] for k in
             ('steamid', 'personaname', 'avatarfull', 'personastate', 'lastlogoff', 'profileurl') if k in p}
             for p in result if isinstance(p, dict) and p.get('steamid') in ids}
@@ -63,7 +95,7 @@ def profiles(key, ids):
 
 def owned_games(key, sid):
     payload = request_api('IPlayerService/GetOwnedGames/v1', key, steamid=sid,
-                          include_appinfo='true', include_played_free_games='true')
+                          include_appinfo=True, include_played_free_games=True)
     response = payload.get('response')
     if not isinstance(response, dict) or 'game_count' not in response:
         raise FriendError('游戏库不可见，可能为私密资料或接口暂未返回。')
@@ -89,7 +121,7 @@ def owned_games(key, sid):
 
 
 class Friends:
-    def __init__(self, root):
+    def __init__(self, root, on_synced=None):
         self.root = root
         self.lock = threading.RLock()
         self.key = None
@@ -98,11 +130,13 @@ class Friends:
         self.revision = 0
         self.job = {'running': False, 'done': 0, 'total': 0, 'message': '连接 Steam API，读取好友的公开收藏。'}
         self.data = {'account_id': '', 'fetched_at': None, 'people': []}
+        self.on_synced = on_synced
 
     def status(self):
         with self.lock:
             return {'data': copy.deepcopy(self.data), 'revision': self.revision,
-                    'key_configured': bool(self.key), 'auth_configured': bool(self.key or self.access_token), 'job': dict(self.job)}
+                    'key_configured': bool(self.key), 'auth_configured': bool(self.key or self.access_token),
+                    'managed_sync': True, 'job': dict(self.job)}
 
     def use_token(self, token, account):
         with self.lock:
@@ -112,13 +146,14 @@ class Friends:
                 self.data = {'account_id': account, 'fetched_at': None, 'people': []}
                 self.save()
             self.access_token = token
+            self.data['account_id'] = account
 
     def save(self):
         self.revision += 1
 
     def start(self, body):
         action = body.get('action', 'list')
-        if action not in ('list', 'sync', 'add'):
+        if action not in ('list', 'sync', 'add', 'prices'):
             return False, '未知的好友操作。'
         with self.lock:
             if self.job['running']:
@@ -129,10 +164,10 @@ class Friends:
             try:
                 account = steam_id(body.get('steamid') or self.data.get('account_id'))
                 ids = body.get('ids', [])
-                if not isinstance(ids, list) or len(ids) > 100:
-                    raise ValueError('每次最多同步 100 位好友。')
+                if not isinstance(ids, list) or len(ids) > 2001:
+                    raise ValueError('每次最多同步 2001 位成员。')
                 ids = list(dict.fromkeys(steam_id(x) for x in ids))
-                if action == 'sync':
+                if action in ('sync', 'prices'):
                     existing = {p['steamid'] for p in self.data['people']}
                     if account != self.data.get('account_id') or not ids or any(s not in existing for s in ids):
                         raise ValueError('请先加载当前账号的好友，再勾选需要同步的成员。')
@@ -145,17 +180,26 @@ class Friends:
             if '.' not in key:
                 self.key = key.strip()
             self.cancel = threading.Event()
-            self.job = {'running': True, 'done': 0, 'total': len(ids), 'message': '正在连接 Steam…'}
-            threading.Thread(target=self.run, args=(action, account, ids, key.strip(), self.cancel), daemon=True).start()
+            region = body.get('region', 'cn')
+            if region not in ('cn', 'us', 'hk'):
+                return False, '未知的估值地区。'
+            self.job = {'running': True, 'phase': 'list' if action == 'list' else 'sync', 'done': 0, 'total': len(ids), 'error': '', 'error_code': '', 'message': '正在读取好友列表…' if action == 'list' else '正在同步游戏库…'}
+            threading.Thread(target=self.run, args=(action, account, ids, key.strip(), self.cancel, region), daemon=True).start()
         return True, '正在读取公开数据，您可以继续浏览。'
 
-    def run(self, action, account, ids, key, cancel):
+    def run(self, action, account, ids, key, cancel, region='cn'):
         try:
             if action == 'list':
-                payload = request_api('ISteamUser/GetFriendList/v1', key, steamid=account, relationship='friend')
-                items = payload.get('friendslist', {}).get('friends')
+                if '.' in key:
+                    payload = request_api('IFriendsListService/GetFriendsList/v1', key)
+                    friendslist = payload.get('response', {}).get('friendslist')
+                    items = ([{'steamid': p.get('ulfriendid')} for p in friendslist.get('friends', [])
+                              if p.get('efriendrelationship') == 3] if isinstance(friendslist, dict) else None)
+                else:
+                    payload = request_api('ISteamUser/GetFriendList/v1', key, steamid=account, relationship='friend')
+                    items = payload.get('friendslist', {}).get('friends')
                 if not isinstance(items, list):
-                    raise FriendError('好友列表不可见，请检查隐私设置，或手动添加 SteamID。')
+                    raise FriendError('好友列表不可见或令牌权限不足；请补充 API Key 或检查隐私设置，无需再次登录。', 'permission')
                 ids = list(dict.fromkeys([account] + [steam_id(p.get('steamid')) for p in items]))[:2001]
                 info = profiles(key, ids)
                 with self.lock:
@@ -168,8 +212,7 @@ class Friends:
                          'friend_since': next((p.get('friend_since') for p in items if str(p.get('steamid')) == sid), None)}
                         for sid in ids]}
                     self.save()
-                    self.job.update(done=len(ids), total=len(ids), message=f'已加载 {len(ids)-1} 位好友，勾选后同步游戏库。')
-                return
+                    self.job.update(done=0, total=len(ids), phase='sync', message=f'已加载 {len(ids)-1} 位好友，正在自动同步全部游戏库…')
             if action == 'add':
                 info = profiles(key, ids)
                 with self.lock:
@@ -183,17 +226,17 @@ class Friends:
                                                         'games': [], 'status': 'pending', 'is_self': sid == account, 'manual': True})
                     self.save()
             failures = 0
-            for index, sid in enumerate(ids):
+            for index, sid in enumerate(ids if action != 'prices' else []):
                 if cancel.is_set():
                     break
                 with self.lock:
                     self.job['message'] = f'正在同步游戏库 {index+1} / {len(ids)}…'
                 try:
                     games = owned_games(key, sid)
-                    update = {'games': games, 'status': 'ok', 'error': '', 'fetched_at': timestamp()}
+                    update = {'games': games, 'status': 'ok', 'error': '', 'error_code': '', 'fetched_at': timestamp()}
                 except FriendError as error:
                     failures += 1
-                    update = {'error': str(error)}
+                    update = {'error': str(error), 'error_code': error.code}
                 with self.lock:
                     if cancel.is_set():
                         break
@@ -204,22 +247,23 @@ class Friends:
                     self.job['done'] = index + 1
                     self.data['fetched_at'] = timestamp()
                     self.save()
-                if '限流' in update.get('error', ''):
-                    with self.lock:
-                        self.job['message'] = 'Steam 限流，已保存进度，请稍后继续同步。'
-                    return
+                if update.get('error_code') == 'rate_limit' or (update.get('error_code') == 'permission' and sid == account):
+                    raise FriendError(update['error'], update['error_code'])
                 if index + 1 < len(ids) and cancel.wait(.35):
                     break
+            if not cancel.is_set() and self.on_synced:
+                self.on_synced(ids, region, cancel)
             with self.lock:
-                self.job['message'] = f'同步完成：{self.job["done"]} 位，{failures} 位暂不可读；私密库不按零元处理。'
+                if cancel is self.cancel and not cancel.is_set():
+                    self.job.update(phase='done', message=f'同步与估值完成：{len(ids)} 位，{failures} 位暂不可读；私密库和未知价格单独标记。')
         except FriendError as error:
             with self.lock:
                 if cancel is self.cancel and not cancel.is_set():
-                    self.job['message'] = str(error)
+                    self.job.update(phase='error', message=str(error), error=str(error), error_code=error.code)
         except Exception:
             with self.lock:
                 if cancel is self.cancel and not cancel.is_set():
-                    self.job['message'] = '同步未完成，已保留上次数据。请稍后重试。'
+                    self.job.update(phase='error', message='同步未完成，已保留上次数据。请稍后重试。', error='同步未完成，请重试。', error_code='upstream')
         finally:
             with self.lock:
                 if cancel is self.cancel:

@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import steam_family_library as steam
-from friend_library import Friends
+from friend_library import Friends, FriendError
 from steam_browser_auth import SteamBrowserAuth, AuthError
 
 ROOT = Path(__file__).resolve().parent
@@ -192,7 +192,7 @@ class App:
         self.prices = read_json(ROOT/'price_cache.json',{})
         self.price_job = {'running':False,'done':0,'total':0,'message':'尚未加载商店价格','region':'cn'}
         self.price_cancel = threading.Event()
-        self.friends = Friends(ROOT)
+        self.friends = Friends(ROOT, self.price_friend_libraries)
         self.browser_auth = SteamBrowserAuth()
         self.friend_auth_cancel = threading.Event()
         self.friend_auth = {'running':False, 'phase':'idle', 'message':'登录 Steam 后自动连接好友，无需复制 API Key。'}
@@ -384,6 +384,50 @@ class App:
             self.phase = 'idle'
             self.message = '已断开连接；本次快照仍可浏览，关闭页面后会过期清除。'
 
+    def price_friend_libraries(self, ids, region, cancel):
+        # One backend job owns list -> libraries -> prices, even with no page open.
+        with self.friends.lock:
+            if cancel.is_set() or cancel is not self.friends.cancel:
+                return
+            self.friends.job.update(phase='pricing', message='游戏库已同步，正在排队补全商店估值…')
+            readable = {p['steamid'] for p in self.friends.data['people']
+                        if p.get('status') in ('ok', 'stale') and p.get('games')}
+        ids = [sid for sid in ids if sid in readable]
+        for offset in range(0, len(ids), 100):
+            while not cancel.is_set():
+                with self.lock:
+                    if not self.price_job['running']:
+                        ok, message = self.start_prices(region, 'friends', ids[offset:offset+100])
+                        if not ok:
+                            raise FriendError(message)
+                        pricing_cancel = self.price_cancel
+                        break
+                cancel.wait(.2)
+            if cancel.is_set():
+                return
+            while not cancel.is_set():
+                with self.lock:
+                    running = self.price_job['running'] and self.price_cancel is pricing_cancel
+                    message = self.price_job['message']
+                    price_error = self.price_job.get('error', '')
+                if not running:
+                    break
+                with self.friends.lock:
+                    if cancel is self.friends.cancel:
+                        self.friends.job['message'] = '正在补全好友估值：' + message
+                cancel.wait(.2)
+            if cancel.is_set():
+                pricing_cancel.set()
+                return
+            if pricing_cancel.is_set() or price_error:
+                raise FriendError(price_error or '估值已暂停，可点击补全估值继续。')
+
+    def cancel_friends(self):
+        self.friends.cancel.set()
+        with self.lock:
+            if self.price_job.get('scope') == 'friends':
+                self.price_cancel.set()
+
     def start_prices(self,region,scope='family',ids=None):
         if region not in REGIONS: return False,'不支持的商店地区。'
         with self.lock:
@@ -451,6 +495,7 @@ class App:
                 if cancel.is_set(): self.price_job['message'] = '价格加载已暂停，进度已保存。'
                 elif not interrupted:
                     self.price_job['message'] = '部分商店请求失败，已保留价格；可以再次补全。' if network_error else '商店价格查询完成；无报价游戏保持未知。'
+                self.price_job['error'] = self.price_job['message'] if interrupted or network_error else ''
                 save_json(ROOT/'price_cache.json',self.prices)
 
 
@@ -489,7 +534,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(403,json.dumps({'error':'请求来源无效，请从本地看板重新操作。'},ensure_ascii=False))
         try:
             size = int(self.headers.get('Content-Length','0'))
-            if not 0<=size<=8192: raise ValueError
+            if not 0<=size<=65536: raise ValueError
             body = json.loads(self.rfile.read(size) or '{}')
             if not isinstance(body,dict): raise ValueError
         except (ValueError,TypeError): return self.send(400,'{"error":"请求格式无效"}')
@@ -510,7 +555,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 ok,msg = app.friends.start(body)
         elif path == '/api/friends/cancel':
-            app.friends.cancel.set();ok,msg = True,'正在取消好友同步…'
+            app.cancel_friends();ok,msg = True,'正在取消好友同步…'
         elif path == '/api/friends/disconnect':
             app.cancel_friend_auth();app.friends.disconnect();ok,msg = True,'已清除内存中的 API Key。'
         elif path == '/api/prices': ok,msg = app.start_prices(body.get('region','cn'),body.get('scope','family'),body.get('ids'))

@@ -108,7 +108,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlsplit(self.path).path
         if path == '/health':
-            return self.send(200, {'ok':True})
+            return self.send(200, {'ok':True, 'version':'2026-10-28-friends-managed-sync'})
         if not self.permitted():
             return
         app = self.app()
@@ -129,7 +129,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             size = int(self.headers.get('Content-Length', '0'))
-            if not 0 <= size <= 16384:
+            if not 0 <= size <= 65536:
                 raise ValueError()
             body = json.loads(self.rfile.read(size) or '{}')
             if not isinstance(body, dict):
@@ -166,7 +166,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 ok, msg = app.friends.start(body)
         elif path == '/api/friends/cancel':
-            app.friends.cancel.set(); ok, msg = True, '正在取消好友同步…'
+            app.cancel_friends(); ok, msg = True, '正在取消好友同步…'
         elif path == '/api/friends/disconnect':
             app.cancel_friend_auth(); app.friends.disconnect(); ok, msg = True, '已清除内存中的 API Key。'
         elif path == '/api/prices': ok, msg = app.start_prices(body.get('region','cn'), body.get('scope','family'), body.get('ids'))

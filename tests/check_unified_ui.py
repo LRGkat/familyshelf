@@ -1,83 +1,87 @@
+"""Browser→real cloud handler→worker integration with synthetic Steam responses."""
 from pathlib import Path
-import sys,threading,json,copy,base64
+import sys,threading,json,base64,time
 from http.server import SimpleHTTPRequestHandler,ThreadingHTTPServer
+from unittest.mock import patch
 from playwright.sync_api import sync_playwright
 sys.path.insert(0,str(Path(__file__).resolve().parents[1] / 'backend'))
-from family_dashboard_server import App
-app=App();base=app.status();app.browser_auth.close()
+import cloud_server as cloud
+import family_dashboard_server as f
+import friend_library as lib
+sid='76561198000000000';friend='76561198000000001';private='76561198000000002'
+token='eyJhbGciOiJSUzI1NiJ9.'+base64.urlsafe_b64encode(json.dumps({'sub':sid,'exp':time.time()+600}).encode()).decode().rstrip('=')+'.synthetic'
+mode={'denied':False};calls=[]
+def api(method,cred,**kw):
+ calls.append(method)
+ if 'GetFriendsList' in method:
+  if mode['denied']:raise lib.FriendError('Steam 拒绝好友接口权限；可补充 API Key，无需再次登录。','permission')
+  return {'response':{'friendslist':{'friends':[{'ulfriendid':s,'efriendrelationship':3} for s in [friend,private]]}}}
+ if 'GetPlayerLinkDetails' in method:return {'response':{'accounts':[{'public_data':{'steamid':s,'persona_name':'Friend '+s[-1]}} for s in kw['steamids']]}}
+ if kw['steamid']==private:return {'response':{}}
+ return {'response':{'game_count':1,'games':[{'appid':10 if kw['steamid']==sid else 20,'name':'Synthetic game','playtime_forever':120}]}}
+def family(token,progress):return f.normalize({'steamid':sid,'members':[{'steamid':sid}],'games':[]})
+def priced(self,region,apps,cancel):
+ with self.lock:
+  for aid in apps:self.prices[f'{region}:{aid}']={'known':True,'checked':time.time(),'initial':1000 if aid==10 else 2000,'final':500,'currency':f.REGIONS[region]}
+  self.price_job.update(running=False,done=len(apps),message='商店价格查询完成',error='')
+api_server=ThreadingHTTPServer(('127.0.0.1',0),cloud.Handler)
+apiurl=f'http://127.0.0.1:{api_server.server_address[1]}'
 root=str(Path(__file__).resolve().parents[1] / 'web')
 class Handler(SimpleHTTPRequestHandler):
  def __init__(self,*a,**kw):super().__init__(*a,directory=root,**kw)
  def log_message(self,*a):pass
-server=ThreadingHTTPServer(('127.0.0.1',0),Handler);threading.Thread(target=server.serve_forever,daemon=True).start()
-url=f'http://127.0.0.1:{server.server_address[1]}'
-class Fixture:
- def __init__(self,n=205):
-  self.s=copy.deepcopy(base);self.calls=[];self.active=None;self.reads=0
-  self.ps=[{'steamid':str(76561198000000000+i),'personaname':f'Friend {i:03d}','status':'pending','is_self':i==0,'games':[]} for i in range(n)]
-  self.s['friends']={'data':{'account_id':self.ps[0]['steamid'],'people':self.ps,'fetched_at':'2026-10-28T00:00:00Z'},'job':{'running':False,'message':f'已加载 {n-1} 位好友，勾选后同步游戏库。'},'revision':1,'key_configured':False,'auth_configured':True,'auth':{'running':False,'phase':'done'}}
-  self.s['session']={'connected':True,'phase':'idle','message':'已同步最新家庭库。'}
- def route(self,r):
-  path=r.request.url.split('/api/')[-1]
-  if path=='session':r.fulfill(status=201,json={'session':'synthetic'});return
-  if path=='state':
-   if self.active:
-    self.reads+=1
-    if self.reads>=3:
-     kind,ids=self.active
-     if kind=='sync':
-      for sid in ids:
-       p=next(p for p in self.ps if p['steamid']==sid);i=self.ps.index(p)
-       p.update(status='unavailable' if i==1 else 'ok',games=[] if i==1 else [{'appid':1000+i,'name':'Synthetic','playtime_forever':i*60}])
-      self.s['friends']['revision']+=1;self.s['friends']['job'].update(running=False,done=len(ids),message='同步完成')
-     else:
-      for sid in ids:
-       for g in next(p for p in self.ps if p['steamid']==sid)['games']:
-        self.s['prices']['cn:'+str(g['appid'])]={'known':True,'initial':g['appid']*100,'final':100,'checked':1,'currency':'CNY'}
-      self.s['price_job'].update(running=False,message='商店价格查询完成')
-     self.active=None
-   r.fulfill(json=self.s);return
-  if path=='friends':
-   b=r.request.post_data_json;assert b['action']=='sync' and len(b['ids'])<=100 and self.active is None
-   self.active=('sync',b['ids']);self.calls.append(self.active);self.reads=0
-   self.s['friends']['job']={'running':True,'done':0,'message':'正在同步'}
-  elif path=='prices':
-   b=r.request.post_data_json;assert b['scope']=='friends' and self.active is None
-   self.active=('prices',b['ids']);self.calls.append(self.active);self.reads=0;self.s['price_job']={'running':True,'scope':'friends','message':'正在估值'}
-  elif path=='refresh':self.calls.append(('refresh',[]))
-  else:raise AssertionError(path)
-  r.fulfill(status=202,json={'message':'OK'})
-with sync_playwright() as p:
- b=p.chromium.launch(headless=True,channel='chromium');f=Fixture();pg=b.new_page(viewport={'width':1440,'height':1000})
- errors=[];pg.on('pageerror',lambda e:errors.append(str(e)));pg.route('**/api/**',f.route)
- pg.add_init_script('const nativeTimeout=window.setTimeout;window.setTimeout=(fn,ms,...a)=>nativeTimeout(fn,ms===1200||ms===12000?35:ms,...a)')
- pg.goto(url+'/#overview');pg.wait_for_function("friendHub.debug().flow.phase==='done'&&!friendHub.running",timeout=30000)
- assert pg.evaluate('friendHub.workspace')=='family'
- assert [len(ids) for kind,ids in f.calls if kind=='sync']==[100,100,5]
- assert [len(ids) for kind,ids in f.calls if kind=='prices']==[99,100,5]
- assert pg.locator('.nav a').all_text_contents()==['家庭贡献','好友收藏','SteamDB价格']
- assert pg.locator('[data-fh-tab=steamdb]').count()==0
- assert pg.locator('.family-sections').is_visible()
- pg.locator('[data-friends-nav]').click();assert pg.locator('#fhTabs').is_visible()
- assert len(pg.evaluate('friendHub.debug().chosen'))==205
- assert pg.locator('.nav a.active').inner_text()=='好友收藏'
- count=len(f.calls)
- pg.locator('[data-db-open]').click();assert pg.locator('#fhTabSteamdb').is_visible() and not pg.locator('#fhTabs').is_visible()
- assert '成员自动同步' in pg.locator('.db-source-note').inner_text()
- assert '205' in pg.locator('#dbSummary').inner_text()
- assert not pg.locator('dialog[open]').count()
- pg.locator('[data-space=friends]').click();pg.locator('[data-fh-tab=compare]').click();assert pg.locator('#fhTabCompare').is_visible()
- pg.locator('[data-space=family]').click();assert pg.locator('.family-sections').is_visible()
- assert len(f.calls)==count
- pg.locator('#refreshBtn').click();assert f.calls[-1][0]=='refresh'
- pg.locator('[data-space=friends]').click();pg.locator('#refreshBtn').click();assert f.calls[-1][0]=='refresh'
+ def do_GET(self):
+  if self.path=='/config.js':
+   raw=f'window.FAMILYSHELF_CONFIG={{apiBase:"{apiurl}"}}'.encode();self.send_response(200);self.send_header('Content-Type','application/javascript');self.end_headers();self.wfile.write(raw);return
+  super().do_GET()
+static=ThreadingHTTPServer(('127.0.0.1',0),Handler);url=f'http://127.0.0.1:{static.server_address[1]}'
+cloud.ORIGINS={url}
+for s in [api_server,static]:threading.Thread(target=s.serve_forever,daemon=True).start()
+with patch.object(lib,'request_api',api),patch.object(f,'fetch_family',family),patch.object(f.App,'fetch_prices',priced),sync_playwright() as p:
+ browser=p.chromium.launch(headless=True,channel='chromium');ctx=browser.new_context(viewport={'width':1440,'height':1000})
+ # Another tab holds the obsolete lock throughout: it must not stall this visitor.
+ holder=ctx.new_page();holder.goto(url);holder.evaluate("navigator.locks.request('familyshelf-friend-pipeline',()=>new Promise(()=>{}));true")
+ page=ctx.new_page();errors=[];posts=[]
+ page.on('pageerror',lambda e:errors.append(str(e)))
+ page.on('request',lambda r:posts.append(r.url.split('/api/')[-1]) if '/api/' in r.url and r.method=='POST' else None)
+ page.add_init_script('const nativeTimeout=window.setTimeout;window.setTimeout=(fn,ms,...a)=>nativeTimeout(fn,ms===1200||ms===12000?150:ms,...a)')
+ page.goto(url+'/#overview');page.wait_for_function('backend')
+ page.locator('#sideConnect').click();page.locator('#authTokenTab').click();page.locator('#steamTokenInput').fill(token);page.locator('#tokenLoginBtn').click()
+ page.wait_for_function("friendHub.debug().people.length===3&&!friendHub.running&&friendHub.debug().people.some(p=>p.known>0)")
+ assert page.evaluate('friendHub.workspace')=='family'
+ assert 'friends' not in posts and 'prices' not in posts,posts # No front-end pipeline.
+ page.locator('[data-friends-nav]').click()
+ assert page.locator('.nav a').all_text_contents()==['家庭贡献','好友收藏']
+ assert page.locator('#fhTabSteamdb').count()==0 and 'SteamDB' not in page.locator('body').inner_text()
+ assert len(page.evaluate('friendHub.debug().chosen'))==3
+ assert page.evaluate('friendHub.debug().ranked[0].steamid')==friend
+ assert page.locator('#fhRows').inner_text().find('不可读取')>=0
+ before=calls.count('IFriendsListService/GetFriendsList/v1')
+ page.locator('#refreshBtn').click()
+ page.wait_for_function('!friendHub.running');assert calls.count('IFriendsListService/GetFriendsList/v1')==before+1
+ assert posts[-1]=='friends',posts
+ # Manual selected synchronization is a single server request and completes pricing.
+ page.locator('#fhSyncSelected').click();page.wait_for_function('!friendHub.running');assert posts[-1]=='friends'
+ page.locator('#fhClearSelection').click();count=len(posts);page.locator('#fhSyncSelected').click()
+ assert '请至少选择' in page.locator('#toast').inner_text() and len(posts)==count
+ page.locator('#fhSelectAll').click()
+ # Permission failures must override "auth shared" and expose a working retry.
+ mode['denied']=True;page.locator('#fhConnect').click()
+ page.wait_for_function("document.querySelector('#fhNotice').classList.contains('failed')")
+ assert '权限' in page.locator('#fhNotice').inner_text() and page.locator('#fhRetry').is_visible()
+ assert '同步未完成' in page.locator('#topStatus').inner_text()
+ mode['denied']=False;page.locator('#fhRetry').click();page.wait_for_function("!friendHub.running&&!document.querySelector('#fhNotice').classList.contains('failed')")
+ assert page.locator('#fhRetry').is_hidden()
  for width in [1440,390]:
-  pg.set_viewport_size({'width':width,'height':1000 if width==1440 else 844})
-  for name in ['family','friends','steamdb']:
-   pg.locator('[data-db-open]' if name=='steamdb' else f'[data-space={name}]').click()
-   assert pg.evaluate('document.documentElement.scrollWidth<=innerWidth'),(width,name)
+  page.set_viewport_size({'width':width,'height':1000 if width==1440 else 844})
+  for space in ['family','friends']:
+   page.locator(f'[data-space={space}]').click();assert page.evaluate('document.documentElement.scrollWidth<=innerWidth'),(width,space)
+  for tab in ['compare','discover','manage','rank']:
+   page.locator(f'[data-fh-tab={tab}]').click();assert page.evaluate('document.documentElement.scrollWidth<=innerWidth'),(width,tab)
  assert not errors,errors
- assert pg.evaluate('localStorage.length')==0 and pg.evaluate('sessionStorage.length')==0
- b.close()
-server.shutdown()
-print('PASS background auto-sync from family page, 205 selected, 100/100/5 batches, prices queue, three-item sidebar, separate subtabs, shared refresh, no relogin on switching, desktop/mobile and no storage/JS errors')
+ assert page.evaluate('localStorage.length')==0 and page.evaluate('sessionStorage.length')==0
+ page.goto(url+'/#steamdb');page.wait_for_function('friendHub.workspace==="friends"');assert page.locator('#fhTabs').is_visible()
+ browser.close()
+for app,_,_ in list(cloud.SESSIONS.values()):cloud.dispose(app)
+for s in [api_server,static]:s.shutdown()
+print('PASS actual cloud HTTP + browser: login auto-sync with another-tab lock, manual sync/refresh, ranking/pricing, permission retry, two sections, mobile layout and no persistent storage')
