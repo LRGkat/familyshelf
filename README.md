@@ -2,12 +2,24 @@
 
 Steam 家庭贡献与好友游戏库价值看板。
 
+前后端源码均在本仓库，采用 [MIT 许可证](LICENSE) 开源，欢迎 Fork、提交 Issue 和 Pull Request。
+
 看板：https://lrgkat.github.io/familyshelf/
 
 后端：https://familyshelf-api.onrender.com/health
 
 前端使用 GitHub Pages，Python API 和临时 Steam 登录浏览器运行在 Render。
 GitHub Pages 仅提供静态页面；把 Python 改写成 JavaScript 并不能让 Pages 运行后端。
+
+## 代码目录
+
+| 路径 | 内容 |
+| --- | --- |
+| `web/` | HTML、CSS、JavaScript 前端源码 |
+| `docs/` | GitHub Pages 发布目录，与 `web/` 保持同步 |
+| `backend/` | Python API、Steam 登录与家庭 / 好友数据同步 |
+| `tests/` | 后端和浏览器集成回归检查 |
+| `Dockerfile`、`render.yaml` | Render 后端部署配置 |
 
 ## 功能与数据口径
 
@@ -56,4 +68,12 @@ Steam 令牌好友接口的原始列表也包含群组关系，后端只同步�
 
 侧栏和空间入口包含家庭贡献、好友收藏与近两周游玩；各自功能在页内展示。SteamDB 没有可用的公开计算器查询 API，已移除依赖手动录入的栏目。旧 #steamdb、#achievements 链接回到好友页。
 
-回归检查：`python3 tests/check_unified_login.py`；安装 Playwright 和 Chromium 后运行 `python3 tests/check_unified_ui.py`。覆盖令牌 / Key 请求格式、后端完整流水线、单次登录、权限错误、手动同步和重试、另一标签页持锁时的同步、双栏目导航与手机布局。浏览器测试走真实本地 HTTP 后端，Steam 返回使用合成数据，不替代真实账号权限验证。
+回归检查：`python3 tests/check_unified_login.py`；安装 Playwright 和 Chromium 后运行 `python3 tests/check_unified_ui.py`。覆盖令牌 / Key 请求格式、后端完整流水线、单次登录、权限错误、手动同步和重试、另一标签页持锁时的同步、三栏目导航与手机布局。浏览器测试走真实本地 HTTP 后端，Steam 返回使用合成数据，不替代真实账号权限验证。
+
+## 参与贡献
+
+提交问题时请说明复现步骤、浏览器版本和错误提示；请勿提交 Steam 令牌、API Key、Cookie 或真实账号数据。修改前端后，将 `web/` 的对应文件同步到 `docs/`；修改登录或同步流程后，运行上述相关回归检查。
+
+## 许可证
+
+本项目源码采用 [MIT License](LICENSE)。Steam 名称、商标、游戏图片和第三方数据的权利归原权利人所有，不属于本项目的许可授权范围。本项目为非 Steam 官方工具。
