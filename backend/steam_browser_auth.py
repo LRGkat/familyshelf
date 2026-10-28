@@ -64,14 +64,15 @@ class SteamBrowserAuth:
             return self.qr
 
     def capture_qr(self, page):
-        # Only transmit the QR canvas, never the account page or API Key page.
+        # Steam currently renders a data-URI GIF; older builds use a canvas.
+        # Only capture that isolated square image on the official login page.
         current = urllib.parse.urlsplit(page.url)
         if current.scheme != 'https' or current.hostname not in ('store.steampowered.com', 'steamcommunity.com') or not current.path.startswith('/login'):
             return
-        for canvas in page.locator('canvas').all():
-            box = canvas.bounding_box()
-            if box and 120 <= box['width'] <= 420 and 120 <= box['height'] <= 420:
-                image = canvas.screenshot(timeout=2000)
+        for element in page.locator('canvas, img[src^="data:image/"]').all():
+            box = element.bounding_box()
+            if box and 120 <= box['width'] <= 420 and 120 <= box['height'] <= 420 and abs(box['width'] - box['height']) < 2:
+                image = element.screenshot(timeout=2000)
                 with self.lock:
                     self.qr = image
                 return
