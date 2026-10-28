@@ -63,8 +63,16 @@ def request_api(method, key, **params):
     else:
         params = {k: str(v).lower() if isinstance(v, bool) else v for k, v in params.items()}
     params['access_token' if '.' in key else 'key'] = key
-    req = urllib.request.Request(f'{steam.API}/{method}/?' + urllib.parse.urlencode(params),
-                                 headers={'User-Agent': 'FamilyShelf/2.0'})
+    encoded = urllib.parse.urlencode(params)
+    if method == 'IPlayerService/GetAchievementsProgress/v1':
+        # Steam explicitly returns 405 Allow: POST for this bulk endpoint.
+        req = urllib.request.Request(f'{steam.API}/{method}/', data=encoded.encode('utf-8'),
+                                     headers={'User-Agent': 'FamilyShelf/2.0',
+                                              'Content-Type': 'application/x-www-form-urlencoded'},
+                                     method='POST')
+    else:
+        req = urllib.request.Request(f'{steam.API}/{method}/?' + encoded,
+                                     headers={'User-Agent': 'FamilyShelf/2.0'})
     try:
         with urllib.request.urlopen(req, timeout=22, context=steam.api_tls_context()) as response:
             eresult = response.headers.get('x-eresult', '1')

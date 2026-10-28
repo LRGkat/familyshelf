@@ -18,7 +18,11 @@ class Response:
     def __exit__(self,*args):pass
     def read(self):return json.dumps(self.payload).encode()
 def upstream(request,**kwargs):
-    q=urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)
+    assert request.get_method() == 'POST', 'Steam requires POST; GET returns HTTP 405'
+    assert not urllib.parse.urlsplit(request.full_url).query, 'credentials belong in the form body'
+    assert request.get_header('Content-type') == 'application/x-www-form-urlencoded'
+    q=urllib.parse.parse_qs(request.data.decode('utf-8'))
+    assert q.get('access_token') == ['synthetic.token.value'] or q.get('key') == ['a'*32]
     data=json.loads(q['input_json'][0]);seen.append(data)
     assert data['include_unvetted_apps'] is True and data['steamid']==SID
     entries=[{'appid':a,'total':10,'unlocked':10,'all_unlocked':True} for a in data['appids']]
@@ -57,4 +61,4 @@ with patch.object(lib,'request_api',side_effect=lib.FriendError('限流','rate_l
 assert [p['achievement_status'] for p in friends.data['people']]==['stale','stale']
 assert friends.data['people'][0]['achievement_games'][0]['unlocked']==10
 assert all(p['achievement_error_code']=='rate_limit' for p in friends.data['people'])
-print('PASS achievements: token/Key bulk JSON, batching, rounded 100%, no-achievement games, missing/private/malformed, cancellation and stale/rate-limit isolation')
+print('PASS achievements: required POST form with token/Key, bulk JSON, batching, rounded 100%, no-achievement games, missing/private/malformed, cancellation and stale/rate-limit isolation')

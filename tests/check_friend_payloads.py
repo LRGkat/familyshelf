@@ -31,7 +31,7 @@ class Response:
 
 def upstream(request, **kwargs):
     parsed = urllib.parse.urlsplit(request.full_url)
-    params = urllib.parse.parse_qs(parsed.query)
+    params = urllib.parse.parse_qs(request.data.decode() if request.data else parsed.query)
     data = json.loads(params['input_json'][0])
     calls.append((parsed.path, data))
     if 'GetFriendsList' in parsed.path:
@@ -55,6 +55,7 @@ def upstream(request, **kwargs):
         if data['steamid'] == EMPTY: return Response({'response': {'total_count': 0}})
         return Response({'response': {'total_count': 1, 'games': [{'appid': 20, 'name': 'Borrowed game', 'playtime_2weeks': 90, 'playtime_forever': 120}]}})
     if 'GetAchievementsProgress' in parsed.path:
+        assert request.get_method() == 'POST'
         return Response({'response': {'achievement_progress': [{'appid':a,'total':10,'unlocked':10} for a in data['appids']]}})
     assert 'GetOwnedGames' in parsed.path
     if data['steamid'] == PRIVATE:
@@ -99,7 +100,7 @@ with patch.object(lib.urllib.request, 'urlopen', upstream):
 # A malformed library affects only that member; other libraries still synchronize.
 def bad_library(request, **kwargs):
     parsed = urllib.parse.urlsplit(request.full_url)
-    params = urllib.parse.parse_qs(parsed.query)
+    params = urllib.parse.parse_qs(request.data.decode() if request.data else parsed.query)
     data = json.loads(params['input_json'][0])
     if 'GetOwnedGames' in parsed.path and data['steamid'] == FRIEND:
         return Response({'response': {'game_count': 1, 'games': [{'appid': 10, 'playtime_forever': 'invalid'}]}})
