@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: familyshelf-api
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: ALLOWED_ORIGINS
+        value: https://lrgkat.github.io
+      - key: MAX_SESSIONS
+        value: "12"
+      - key: MAX_LOGIN_BROWSERS
+        value: "1"

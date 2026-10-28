@@ -1,0 +1,8 @@
+.git
+web
+docs
+work
+**/__pycache__
+**/*data.json
+**/*cache.json
+.env*
