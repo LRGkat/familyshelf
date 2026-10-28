@@ -181,6 +181,8 @@ class App:
         self.data = normalize(seed)
         self.lock = threading.RLock()
         self.token = None
+        self.login_method = 'token'
+        self.browser_key_pending = False
         self.csrf = secrets.token_urlsafe(32)
         self.phase = 'idle'
         self.message = '连接 Steam，开始同步你的家庭收藏。'
@@ -205,9 +207,13 @@ class App:
     def start(self,login=False):
         with self.lock:
             if self.phase in ('login','refresh'): return False,'已有登录或同步任务正在进行。'
+            if login and self.friends.status()['job']['running']: return False,'好友正在同步，请先等待完成或取消。'
             if login and self.friend_auth['running']: return False,'好友正在等待 Steam 授权，请先完成或取消。'
             if not login and not self.token: return False,'请先连接 Steam。'
             self.cancel = threading.Event()
+            if login:
+                self.login_method = 'qr'
+                self.browser_key_pending = True
             self.phase = 'login' if login else 'refresh'
             self.message = '正在打开 Steam 官方登录窗口…' if login else '正在同步家庭数据…'
             self.job_id += 1
@@ -235,7 +241,9 @@ class App:
             friend_account = self.friends.status()['data'].get('account_id')
             if friend_account and friend_account != account:
                 self.friends.disconnect()
-            self.friend_auth['message'] = '已选择令牌登录；好友榜单可使用 SteamID 和 API Key 手动连接。'
+            self.login_method = 'token'
+            self.browser_key_pending = False
+            self.friend_auth['message'] = '将复用本次令牌连接好友，不再发起登录。'
             self.job_id += 1
             self.cancel = threading.Event()
             self.phase = 'refresh'
@@ -245,6 +253,8 @@ class App:
 
     def start_friend_auth(self):
         with self.lock:
+            if not self.token:
+                return False, '请先使用统一入口登录 Steam，随后会自动连接所有榜单。'
             if self.friend_auth['running']:
                 return False, '正在等待 Steam 官方窗口，请完成登录或确认。'
             if self.phase in ('login', 'refresh'):
@@ -262,20 +272,31 @@ class App:
                 if cancel is self.friend_auth_cancel and not cancel.is_set():
                     self.friend_auth['message'] = message
         try:
-            token = self.browser_auth.request('token', cancel, progress)
-            # Always identify the logged-in browser account, not an old cached SteamID.
+            # Reuse the shared login; never request a second Steam login for friends.
+            with self.lock:
+                token = self.token
+                read_browser_key = self.browser_key_pending
+                self.browser_key_pending = False
             account = str(steam.steamid_from_token(token))
             with self.lock:
-                if cancel.is_set():
+                if cancel.is_set() or cancel is not self.friend_auth_cancel:
                     return
-                self.token = token
+                self.friends.use_token(token, account)
                 self.friend_auth['phase'] = 'key'
-            key = self.browser_auth.request('key', cancel, progress)
+            key = self.friends.key
+            if read_browser_key and key:
+                self.browser_auth.reset()
+            if read_browser_key and not key:
+                try:
+                    key = self.browser_auth.request('key', cancel, progress)
+                except AuthError:
+                    # Some accounts have no key. Try the existing token without another login.
+                    progress('未读取到 API Key，改用本次令牌读取好友；权限不足时可补充 Key。')
             with self.lock:
                 if cancel.is_set() or cancel is not self.friend_auth_cancel:
                     return
                 ok, message = self.friends.start({'action':'list','steamid':account,'key':key})
-                self.friend_auth.update(phase='done' if ok else 'error', message='已自动连接，正在加载好友列表；加载后勾选好友同步游戏库。' if ok else message)
+                self.friend_auth.update(phase='done' if ok else 'error', message='已复用登录，自动加载全部好友、同步游戏库并排名。' if ok else message)
         except AuthError as error:
             progress(str(error))
             with self.lock:
@@ -313,6 +334,10 @@ class App:
             if cancel.is_set(): return
             with self.lock:
                 if job != self.job_id: return
+                account = str(steam.steamid_from_token(token))
+                if str(self.data.get('steamid', '')) not in ('', account):
+                    self.data = normalize({'steamid': account, 'members': [], 'games': []})
+                    self.revision += 1
                 self.token = token
                 self.phase = 'refresh'
             data = fetch_family(token,progress)
@@ -326,7 +351,9 @@ class App:
         except SteamFailure as e:
             with self.lock:
                 if job != self.job_id: return
-                if e.auth: self.token = None
+                if e.auth:
+                    self.token = None
+                    self.friends.disconnect()
                 self.phase = 'error'
                 self.message = str(e)
         except Exception:
@@ -339,14 +366,18 @@ class App:
                 if cancel.is_set() and job == self.job_id:
                     self.phase = 'idle'
                     self.message = '已取消操作，保留上次快照。'
-            if login and not cancel.is_set() and self.token and job == self.job_id:
-                self.start_friend_auth()
+            with self.lock:
+                if not cancel.is_set() and self.token and job == self.job_id:
+                    if self.data.get('games'):
+                        self.start_prices('cn')
+                    self.start_friend_auth()
 
     def disconnect(self):
         with self.lock:
             self.cancel.set()
             self.job_id += 1
             self.token = None
+            self.browser_key_pending = False
             self.cancel_friend_auth()
             self.friends.disconnect()
             self.browser_auth.reset()

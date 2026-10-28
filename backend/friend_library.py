@@ -1,4 +1,4 @@
-"""Steam public friends/libraries; API keys stay in process memory."""
+"""Steam public friends/libraries; Credentials stay in process memory."""
 import copy
 import json
 import re
@@ -28,7 +28,7 @@ class FriendError(Exception):
 
 
 def request_api(method, key, **params):
-    params['key'] = key
+    params['access_token' if '.' in key else 'key'] = key
     req = urllib.request.Request(f'{steam.API}/{method}/?' + urllib.parse.urlencode(params),
                                  headers={'User-Agent': 'FamilyShelf/2.0'})
     try:
@@ -41,7 +41,7 @@ def request_api(method, key, **params):
         if error.code == 429:
             raise FriendError('Steam 请求限流，请稍后重试。') from None
         if error.code in (401, 403):
-            raise FriendError('Steam 拒绝读取：请检查 API Key 和资料隐私设置。') from None
+            raise FriendError('Steam 未授权读取此数据：可补充 API Key，并检查好友列表 / 游戏详情的隐私设置；无需重复登录。') from None
         raise FriendError(f'Steam 接口暂不可用（HTTP {error.code}）。') from None
     except FriendError:
         raise
@@ -93,6 +93,7 @@ class Friends:
         self.root = root
         self.lock = threading.RLock()
         self.key = None
+        self.access_token = None
         self.cancel = threading.Event()
         self.revision = 0
         self.job = {'running': False, 'done': 0, 'total': 0, 'message': '连接 Steam API，读取好友的公开收藏。'}
@@ -101,7 +102,16 @@ class Friends:
     def status(self):
         with self.lock:
             return {'data': copy.deepcopy(self.data), 'revision': self.revision,
-                    'key_configured': bool(self.key), 'job': dict(self.job)}
+                    'key_configured': bool(self.key), 'auth_configured': bool(self.key or self.access_token), 'job': dict(self.job)}
+
+    def use_token(self, token, account):
+        with self.lock:
+            if self.data['account_id'] not in ('', account):
+                self.cancel.set()
+                self.key = None
+                self.data = {'account_id': account, 'fetched_at': None, 'people': []}
+                self.save()
+            self.access_token = token
 
     def save(self):
         self.revision += 1
@@ -113,8 +123,8 @@ class Friends:
         with self.lock:
             if self.job['running']:
                 return False, '已有好友同步任务，请等待完成或先取消。'
-            key = body.get('key') or self.key
-            if not isinstance(key, str) or not re.fullmatch(r'[a-fA-F0-9]{32}', key.strip()):
+            key = body.get('key') or self.key or self.access_token
+            if not isinstance(key, str) or not ((bool(self.access_token) and key == self.access_token) or re.fullmatch(r'[a-fA-F0-9]{32}', key.strip())):
                 return False, '请先设置有效的 Steam Web API Key（32 位十六进制字符）。'
             try:
                 account = steam_id(body.get('steamid') or self.data.get('account_id'))
@@ -132,10 +142,11 @@ class Friends:
                     raise ValueError('请先为新账号加载好友列表，再手动添加。')
             except ValueError as error:
                 return False, str(error)
-            self.key = key.strip()
+            if '.' not in key:
+                self.key = key.strip()
             self.cancel = threading.Event()
             self.job = {'running': True, 'done': 0, 'total': len(ids), 'message': '正在连接 Steam…'}
-            threading.Thread(target=self.run, args=(action, account, ids, self.key, self.cancel), daemon=True).start()
+            threading.Thread(target=self.run, args=(action, account, ids, key.strip(), self.cancel), daemon=True).start()
         return True, '正在读取公开数据，您可以继续浏览。'
 
     def run(self, action, account, ids, key, cancel):
@@ -203,18 +214,22 @@ class Friends:
                 self.job['message'] = f'同步完成：{self.job["done"]} 位，{failures} 位暂不可读；私密库不按零元处理。'
         except FriendError as error:
             with self.lock:
-                self.job['message'] = str(error)
+                if cancel is self.cancel and not cancel.is_set():
+                    self.job['message'] = str(error)
         except Exception:
             with self.lock:
-                self.job['message'] = '同步未完成，已保留上次数据。请稍后重试。'
+                if cancel is self.cancel and not cancel.is_set():
+                    self.job['message'] = '同步未完成，已保留上次数据。请稍后重试。'
         finally:
             with self.lock:
-                self.job['running'] = False
-                if cancel.is_set():
-                    self.job['message'] = '已取消好友同步，保留已完成的快照。'
+                if cancel is self.cancel:
+                    self.job['running'] = False
+                    if cancel.is_set():
+                        self.job['message'] = '已取消好友同步，保留已完成的快照。'
 
     def disconnect(self):
         with self.lock:
             self.cancel.set()
             self.key = None
+            self.access_token = None
             self.job['message'] = '已清除内存中的 API Key；本地好友快照仍可浏览。'

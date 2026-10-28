@@ -46,3 +46,13 @@ ALLOWED_ORIGINS=http://127.0.0.1:8766 PORT=10000 python backend/cloud_server.py
 
 将开发用 config.js 的 apiBase 设置为 `http://127.0.0.1:10000`，在 web 目录执行 `python -m http.server 8766 --bind 127.0.0.1`。
 原有本地看板与本目录的云端部署相互独立。
+
+### 统一登录和导航
+
+扫码或令牌登录后，复用同一会话同步家庭库、自动补全家庭估值，并加载全部好友。好友库自动同步与估值不再要求先切换到好友页面。扫码会在现有登录浏览器中尝试读取已有 Key；没有 Key 时使用同一 access_token，若 Steam 拒绝权限，需补充 Key（无需再次登录）。令牌登录不会启动浏览器。
+
+SteamDB 共用家庭与好友名单，已有同币种价格自动排名。SteamDB 无可用的公开计算器查询 API，服务器请求会遇到验证拦截，因此金额仍需录入 / 导入，不宣称自动读取价格或真实消费。
+
+侧栏仅保留家庭贡献、好友收藏、SteamDB价格。家庭功能放在家庭页内导航，好友功能放在好友页内导航，SteamDB 不再作为好友子标签重复显示。所有认证和数据仍仅在会话内存中保留。
+
+回归检查：`python3 tests/check_unified_login.py`；安装 Playwright 和 Chromium 后可运行 `python3 tests/check_unified_ui.py`，覆盖停留家庭页的后台同步、205 人分批估值、导航切换与移动端布局。测试仅使用合成数据。
