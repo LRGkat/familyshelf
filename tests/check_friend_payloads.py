@@ -54,6 +54,8 @@ def upstream(request, **kwargs):
         if data['steamid'] == PRIVATE: return Response({'response': {}})
         if data['steamid'] == EMPTY: return Response({'response': {'total_count': 0}})
         return Response({'response': {'total_count': 1, 'games': [{'appid': 20, 'name': 'Borrowed game', 'playtime_2weeks': 90, 'playtime_forever': 120}]}})
+    if 'GetAchievementsProgress' in parsed.path:
+        return Response({'response': {'achievement_progress': [{'appid':a,'total':10,'unlocked':10} for a in data['appids']]}})
     assert 'GetOwnedGames' in parsed.path
     if data['steamid'] == PRIVATE:
         return Response({'response': {}})
@@ -86,6 +88,10 @@ with patch.object(lib.urllib.request, 'urlopen', upstream):
         assert friends.data['people'][1]['recent_games'][0]['playtime_2weeks'] == 90
         assert friends.data['people'][2]['recent_status'] == 'unavailable'
         assert friends.data['people'][3]['recent_status'] == 'ok' and friends.data['people'][3]['recent_games'] == []
+        assert friends.data['people'][1]['achievement_status'] == 'ok'
+        assert {g['appid'] for g in friends.data['people'][1]['achievement_games']} == {10,20}
+        assert friends.data['people'][2]['achievement_status'] == 'unavailable'
+        assert friends.data['people'][3]['achievement_status'] == 'ok'
         assert priced[-1] == [SELF, FRIEND, PRIVATE, EMPTY]
     assert not any('103582' in str(data) for path, data in calls if 'GetFriendsList' not in path)
     assert TOKEN not in json.dumps(friends.status())

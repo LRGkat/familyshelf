@@ -39,6 +39,7 @@ def api(method,cred,**params):
     if 'GetPlayerLinkDetails' in method:return {'response':{'accounts':[{'public_data':{'steamid':s,'persona_name':'Synthetic'},'private_data':{'account_name':'must-never-leak'}} for s in params['steamids']]}}
     if 'GetPlayerSummaries' in method:return {'response':{'players':[{'steamid':s,'personaname':'Synthetic'} for s in params['steamids'].split(',')]}}
     if 'GetRecentlyPlayedGames' in method:return {'response':{'total_count':0}}
+    if 'GetAchievementsProgress' in method:return {'response':{'achievement_progress':[{'appid':a,'total':10,'unlocked':10,'all_unlocked':True} for a in params['appids']]}}
     assert 'GetOwnedGames' in method
     return {'response':{'game_count':1,'games':[{'appid':10,'name':'Synthetic Game'}]}}
 def family(value,progress):return f.normalize({'steamid':sid,'members':[{'steamid':sid}],'games':[{'appid':10,'name':'Synthetic','exclude_reason_code':0,'owner_steamids':[sid]}]})

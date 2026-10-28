@@ -57,7 +57,8 @@ class FriendError(Exception):
 
 
 def request_api(method, key, **params):
-    if '.' in key and method.startswith(('IPlayerService/', 'IFriendsListService/')):
+    if ('.' in key and method.startswith(('IPlayerService/', 'IFriendsListService/'))
+            or method == 'IPlayerService/GetAchievementsProgress/v1'):
         params = {'input_json': json.dumps(params)}
     else:
         params = {k: str(v).lower() if isinstance(v, bool) else v for k, v in params.items()}
@@ -183,6 +184,45 @@ def recently_played(key, sid):
         result.append({'appid': appid, 'name': str(game.get('name') or f'App {appid}')[:300],
                        'playtime_2weeks': minutes, 'playtime_forever': total})
     return result
+
+
+def achievement_progress(key, sid, games, cancel, on_progress=None):
+    """Read bulk progress; omitted apps remain unknown, never zero completions."""
+    catalog = {g['appid']: g for g in games}
+    ids = list(catalog)
+    found = {}
+    for offset in range(0, len(ids), 100):
+        if cancel.is_set():
+            return None
+        batch = ids[offset:offset + 100]
+        payload = request_api('IPlayerService/GetAchievementsProgress/v1', key,
+                              steamid=sid, appids=batch, language='schinese', include_unvetted_apps=True)
+        response = payload.get('response')
+        entries = response.get('achievement_progress') if isinstance(response, dict) else None
+        if not isinstance(entries, list):
+            raise FriendError('Steam 未返回成就进度，请检查游戏详情隐私或当前认证的成就接口权限。', 'achievement_unavailable')
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise FriendError('Steam 成就数据格式无效，已保留上次快照。', 'achievement_format')
+            appid, total, unlocked = entry.get('appid'), entry.get('total', 0), entry.get('unlocked', 0)
+            if (not isinstance(appid, int) or isinstance(appid, bool) or appid not in batch or appid in found
+                    or any(not isinstance(n, int) or isinstance(n, bool) or n < 0 for n in (total, unlocked))
+                    or unlocked > total):
+                raise FriendError('Steam 成就数量无效，已保留上次快照。', 'achievement_format')
+            found[appid] = {'appid': appid, 'name': catalog[appid]['name'], 'total': total,
+                            'unlocked': unlocked, 'complete': total > 0 and unlocked == total,
+                            'playtime_forever': catalog[appid].get('playtime_forever', 0)}
+        if on_progress:
+            on_progress(min(offset + len(batch), len(ids)), len(ids))
+        if offset + len(batch) < len(ids) and cancel.wait(.2):
+            return None
+    unknown = len(ids) - len(found)
+    return {'achievement_games': list(found.values()), 'achievement_scope': len(ids),
+            'achievement_checked': len(found), 'achievement_unknown': unknown,
+            'achievement_status': 'partial' if unknown else 'ok',
+            'achievement_error': f'{unknown} 款游戏未返回成就数据，已确认结果可查看，暂不参与完整排名。' if unknown else '',
+            'achievement_error_code': 'achievement_incomplete' if unknown else '',
+            'achievement_fetched_at': timestamp()}
 
 
 class Friends:
@@ -329,9 +369,17 @@ class Friends:
             if not cancel.is_set() and self.on_synced:
                 stage = 'pricing'
                 self.on_synced(ids, region, cancel)
+            # Run after libraries and prices so a slow/private achievement service
+            # cannot prevent the existing boards from receiving their data.
+            if not cancel.is_set() and action != 'prices':
+                stage = 'achievements'
+                self.sync_achievements(ids, self.access_token or key, cancel)
             with self.lock:
                 if cancel is self.cancel and not cancel.is_set():
-                    self.job.update(phase='done', message=f'同步与估值完成：{len(ids)} 位，{failures} 位暂不可读；私密库和未知价格单独标记。')
+                    achievement_ready = sum(p.get('achievement_status') == 'ok'
+                                            for p in self.data['people'] if p['steamid'] in ids)
+                    suffix = f'成就完整读取 {achievement_ready} / {len(ids)} 位，未完整记录单独标记。' if action != 'prices' else '未知价格单独标记。'
+                    self.job.update(phase='done', message=f'同步与估值完成：{len(ids)} 位，{failures} 位游戏库暂不可读；{suffix}')
         except FriendError as error:
             with self.lock:
                 if cancel is self.cancel and not cancel.is_set():
@@ -343,7 +391,7 @@ class Friends:
                               if frame.filename == __file__)
             diagnostic = f'{stage}-{type(error).__name__}'
             print(f'friends_sync_failure code={diagnostic} frames={frames}', file=sys.stderr, flush=True)
-            label = {'list':'读取好友列表', 'profiles':'读取好友资料', 'libraries':'同步游戏库', 'pricing':'补全商店估值'}[stage]
+            label = {'list':'读取好友列表', 'profiles':'读取好友资料', 'libraries':'同步游戏库', 'pricing':'补全商店估值', 'achievements':'同步好友成就'}[stage]
             message = f'{label}遇到数据处理错误（{diagnostic}），已保留已完成的数据。'
             with self.lock:
                 if cancel is self.cancel and not cancel.is_set():
@@ -354,6 +402,54 @@ class Friends:
                     self.job['running'] = False
                     if cancel.is_set():
                         self.job['message'] = '已取消好友同步，保留已完成的快照。'
+
+    def sync_achievements(self, ids, key, cancel):
+        for index, sid in enumerate(ids):
+            if cancel.is_set():
+                return
+            with self.lock:
+                person = next(p for p in self.data['people'] if p['steamid'] == sid)
+                self.job.update(phase='achievements', done=index, total=len(ids),
+                                message=f'正在统计全成就 {index+1} / {len(ids)} 位…')
+                # A stale/private library cannot establish the current scan scope.
+                readable = person.get('status') == 'ok'
+                games = {g['appid']: g for g in person.get('games', [])}
+                if person.get('recent_status') == 'ok':
+                    games.update({g['appid']: g for g in person.get('recent_games', [])})
+            try:
+                if not readable:
+                    raise FriendError('游戏库不可读取，无法确认全成就统计范围；请检查 Steam 游戏详情隐私。', 'achievement_private')
+                def progress(done, total):
+                    with self.lock:
+                        if cancel is self.cancel:
+                            self.job['message'] = f'正在统计全成就 {index+1} / {len(ids)} 位 · {done} / {total} 款游戏…'
+                update = achievement_progress(key, sid, list(games.values()), cancel, progress)
+                if update is None:
+                    return
+            except FriendError as error:
+                update = {'achievement_status': 'stale' if person.get('achievement_fetched_at') else 'unavailable',
+                          'achievement_error': str(error), 'achievement_error_code': error.code}
+            with self.lock:
+                if cancel.is_set() or cancel is not self.cancel:
+                    return
+                person.update(update)
+                self.job['done'] = index + 1
+                self.save()
+            if update.get('achievement_error_code') in ('rate_limit', 'permission'):
+                # Stop this phase on global throttling/auth errors. Invalidate all
+                # remaining old snapshots instead of leaving apparently fresh ranks.
+                with self.lock:
+                    if cancel.is_set() or cancel is not self.cancel:
+                        return
+                    for remaining in self.data['people']:
+                        if remaining['steamid'] in ids[index+1:]:
+                            remaining.update(achievement_status='stale' if remaining.get('achievement_fetched_at') else 'unavailable',
+                                             achievement_error=update['achievement_error'],
+                                             achievement_error_code=update['achievement_error_code'])
+                    self.save()
+                return
+            if index + 1 < len(ids) and cancel.wait(.2):
+                return
 
     def disconnect(self):
         with self.lock:

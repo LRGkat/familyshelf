@@ -108,7 +108,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlsplit(self.path).path
         if path == '/health':
-            return self.send(200, {'ok':True, 'version':'2026-10-28-recent-activity'})
+            return self.send(200, {'ok':True, 'version':'2026-10-28-achievements'})
         if not self.permitted():
             return
         app = self.app()
