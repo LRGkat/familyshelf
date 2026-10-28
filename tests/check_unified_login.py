@@ -38,6 +38,7 @@ def api(method,cred,**params):
     if 'GetFriendList' in method:return {'friendslist':{'friends':[{'steamid':other}]}}
     if 'GetPlayerLinkDetails' in method:return {'response':{'accounts':[{'public_data':{'steamid':s,'persona_name':'Synthetic'},'private_data':{'account_name':'must-never-leak'}} for s in params['steamids']]}}
     if 'GetPlayerSummaries' in method:return {'response':{'players':[{'steamid':s,'personaname':'Synthetic'} for s in params['steamids'].split(',')]}}
+    if 'GetRecentlyPlayedGames' in method:return {'response':{'total_count':0}}
     assert 'GetOwnedGames' in method
     return {'response':{'game_count':1,'games':[{'appid':10,'name':'Synthetic Game'}]}}
 def family(value,progress):return f.normalize({'steamid':sid,'members':[{'steamid':sid}],'games':[{'appid':10,'name':'Synthetic','exclude_reason_code':0,'owner_steamids':[sid]}]})

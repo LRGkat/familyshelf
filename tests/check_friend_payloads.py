@@ -50,6 +50,10 @@ def upstream(request, **kwargs):
             {'public_data': {'steamid': FRIEND, 'persona_name': 'Friend', 'sha_digest_avatar': 'invalid'}},
             {'public_data': None}, {}, None,
         ]}})
+    if 'GetRecentlyPlayedGames' in parsed.path:
+        if data['steamid'] == PRIVATE: return Response({'response': {}})
+        if data['steamid'] == EMPTY: return Response({'response': {'total_count': 0}})
+        return Response({'response': {'total_count': 1, 'games': [{'appid': 20, 'name': 'Borrowed game', 'playtime_2weeks': 90, 'playtime_forever': 120}]}})
     assert 'GetOwnedGames' in parsed.path
     if data['steamid'] == PRIVATE:
         return Response({'response': {}})
@@ -78,6 +82,10 @@ with patch.object(lib.urllib.request, 'urlopen', upstream):
         assert friends.job['phase'] == 'done', friends.job
         assert [p['steamid'] for p in friends.data['people']] == [SELF, FRIEND, PRIVATE, EMPTY]
         assert [p['status'] for p in friends.data['people']] == ['ok', 'ok', 'unavailable', 'ok']
+        assert friends.data['people'][1]['recent_games'][0]['appid'] == 20
+        assert friends.data['people'][1]['recent_games'][0]['playtime_2weeks'] == 90
+        assert friends.data['people'][2]['recent_status'] == 'unavailable'
+        assert friends.data['people'][3]['recent_status'] == 'ok' and friends.data['people'][3]['recent_games'] == []
         assert priced[-1] == [SELF, FRIEND, PRIVATE, EMPTY]
     assert not any('103582' in str(data) for path, data in calls if 'GetFriendsList' not in path)
     assert TOKEN not in json.dumps(friends.status())
@@ -97,6 +105,20 @@ with patch.object(lib.urllib.request, 'urlopen', bad_library):
     assert friends.job['phase'] == 'done'
     assert friends.data['people'][1]['status'] == 'stale'
     assert friends.data['people'][1]['error_code'] == 'library_format'
+
+# Recent failures retain their own snapshot without breaking library valuation.
+def bad_recent(request, **kwargs):
+    if 'GetRecentlyPlayedGames' in request.full_url:
+        return Response({'response': {'total_count': 1, 'games': [{'appid': 20, 'playtime_2weeks': 'invalid'}]}})
+    return upstream(request, **kwargs)
+with patch.object(lib.urllib.request, 'urlopen', bad_recent):
+    assert friends.start({'action': 'list'})[0]
+    finish()
+    assert friends.job['phase'] == 'done'
+    person = friends.data['people'][1]
+    assert person['status'] == 'ok' and person['recent_status'] == 'stale'
+    assert person['recent_games'][0]['playtime_2weeks'] == 90
+    assert person['recent_error_code'] == 'recent_format'
 
 # Unexpected errors have safe stage diagnostics without credential-bearing messages.
 diagnostics = io.StringIO()

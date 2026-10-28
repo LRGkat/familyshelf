@@ -17,6 +17,10 @@ def api(method,cred,**kw):
   if mode['denied']:raise lib.FriendError('Steam 拒绝好友接口权限；可补充 API Key，无需再次登录。','permission')
   return {'response':{'friendslist':{'friends':[{'ulfriendid':s,'efriendrelationship':3} for s in [friend,private,'103582791429521412']]}}}
  if 'GetPlayerLinkDetails' in method:return {'response':{'accounts':[{'public_data':{'steamid':s,'persona_name':'Friend '+s[-1]}} for s in kw['steamids']]}}
+ if 'GetRecentlyPlayedGames' in method:
+  if kw['steamid']==private:return {'response':{}}
+  games=[{'appid':413150,'name':'Borrowed Stardew','playtime_forever':600,'playtime_2weeks':180},{'appid':620,'name':'Portal 2','playtime_forever':400,'playtime_2weeks':120}] if kw['steamid']==friend else []
+  return {'response':{'total_count':len(games),'games':games}}
  if kw['steamid']==private:return {'response':{}}
  return {'response':{'game_count':1,'games':[{'appid':10 if kw['steamid']==sid else 20,'name':'Synthetic game','playtime_forever':120}]}}
 def family(token,progress):return f.normalize({'steamid':sid,'members':[{'steamid':sid}],'games':[]})
@@ -51,11 +55,42 @@ with patch.object(lib,'request_api',api),patch.object(f,'fetch_family',family),p
  assert page.evaluate('friendHub.workspace')=='family'
  assert 'friends' not in posts and 'prices' not in posts,posts # No front-end pipeline.
  page.locator('[data-friends-nav]').click()
- assert page.locator('.nav a').all_text_contents()==['家庭贡献','好友收藏']
+ assert page.locator('.nav a').all_text_contents()==['家庭贡献','好友收藏','近两周游玩']
  assert page.locator('#fhTabSteamdb').count()==0 and 'SteamDB' not in page.locator('body').inner_text()
  assert len(page.evaluate('friendHub.debug().chosen'))==3
  assert page.evaluate('friendHub.debug().ranked[0].steamid')==friend
  assert page.locator('#fhRows').inner_text().find('不可读取')>=0
+ # New activity workspace ranks independently of ownership and expands real recent records.
+ page.locator('[data-space=recent]').click()
+ assert page.evaluate('friendHub.workspace')=='recent' and page.locator('#recentSpace').is_visible()
+ assert page.evaluate('recentUI.debug().ranked[0].steamid')==friend
+ row=page.locator(f'details[data-rp-id="{friend}"]')
+ row.locator('summary').click()
+ assert row.get_attribute('open') is not None
+ row.locator('.rp-game').first.wait_for()
+ assert row.locator('.rp-game').count()==2
+ assert row.locator('.rp-game strong').all_text_contents()==['Borrowed Stardew','Portal 2']
+ assert row.locator('img[alt="Borrowed Stardew 游戏封面"]').get_attribute('src').endswith('/413150/header.jpg')
+ assert '3 小时' in row.locator('.rp-game').first.inner_text()
+ page.locator('#rpSearch').fill('Friend 1');assert page.locator('.rp-person').count()==1
+ page.locator('#rpSearch').fill('');page.locator('#rpFilter').select_option('idle');assert page.locator('.rp-person').count()==1
+ page.locator('#rpFilter').select_option('unavailable');assert page.locator('.rp-person').count()==1
+ assert page.locator('.rp-time b').inner_text()=='—'
+ page.locator('#rpFilter').select_option('all')
+ page.locator('#rpSelf').click();assert page.locator('.rp-person').count()==2
+ page.locator('#rpSelf').click()
+ # Opening survives a data render, supports keyboard collapse, and never loses details.
+ page.evaluate('friendHub.render()')
+ assert page.locator(f'details[data-rp-id="{friend}"]').get_attribute('open') is not None
+ row=page.locator(f'details[data-rp-id="{friend}"]');row.locator('summary').focus();row.locator('summary').press('Enter')
+ assert row.get_attribute('open') is None
+ for width in [1440,390]:
+  page.set_viewport_size({'width':width,'height':1000 if width==1440 else 844})
+  page.locator(f'details[data-rp-id="{friend}"] summary').click()
+  assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+  page.locator(f'details[data-rp-id="{friend}"] summary').click()
+ page.set_viewport_size({'width':1440,'height':1000})
+ page.locator('[data-space=friends]').click()
  before=calls.count('IFriendsListService/GetFriendsList/v1')
  page.locator('#refreshBtn').click()
  page.wait_for_function('!friendHub.running');assert calls.count('IFriendsListService/GetFriendsList/v1')==before+1
@@ -74,14 +109,16 @@ with patch.object(lib,'request_api',api),patch.object(f,'fetch_family',family),p
  assert page.locator('#fhRetry').is_hidden()
  for width in [1440,390]:
   page.set_viewport_size({'width':width,'height':1000 if width==1440 else 844})
-  for space in ['family','friends']:
+  for space in ['family','friends','recent']:
    page.locator(f'[data-space={space}]').click();assert page.evaluate('document.documentElement.scrollWidth<=innerWidth'),(width,space)
+  page.locator('[data-space=friends]').click()
   for tab in ['compare','discover','manage','rank']:
    page.locator(f'[data-fh-tab={tab}]').click();assert page.evaluate('document.documentElement.scrollWidth<=innerWidth'),(width,tab)
  assert not errors,errors
  assert page.evaluate('localStorage.length')==0 and page.evaluate('sessionStorage.length')==0
  page.goto(url+'/#steamdb');page.wait_for_function('friendHub.workspace==="friends"');assert page.locator('#fhTabs').is_visible()
+ page.goto(url+'/#recent');page.wait_for_function('friendHub.workspace==="recent"');assert page.locator('#recentSpace').is_visible()
  browser.close()
 for app,_,_ in list(cloud.SESSIONS.values()):cloud.dispose(app)
 for s in [api_server,static]:s.shutdown()
-print('PASS actual cloud HTTP + browser: login auto-sync with another-tab lock, manual sync/refresh, ranking/pricing, permission retry, two sections, mobile layout and no persistent storage')
+print('PASS actual cloud HTTP + browser: login auto-sync with another-tab lock, manual sync/refresh, ranking/pricing, permission retry, recent game details, three sections, mobile layout and no persistent storage')

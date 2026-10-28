@@ -156,6 +156,35 @@ def owned_games(key, sid):
     return clean
 
 
+def recently_played(key, sid):
+    payload = request_api('IPlayerService/GetRecentlyPlayedGames/v1', key, steamid=sid, count=0)
+    response = payload.get('response')
+    if not isinstance(response, dict) or 'total_count' not in response:
+        raise FriendError('最近游玩详情不可见或 Steam 暂未返回，请检查游戏详情隐私设置。', 'recent_unavailable')
+    count, games = response['total_count'], response.get('games', [])
+    if (not isinstance(count, int) or isinstance(count, bool) or count < 0
+            or not isinstance(games, list) or count != len(games)):
+        raise FriendError('最近游玩数据不完整，保留上次快照。', 'recent_format')
+    result, seen = [], set()
+    for game in games:
+        if not isinstance(game, dict):
+            raise FriendError('最近游玩条目格式无效。', 'recent_format')
+        appid = game.get('appid')
+        if not isinstance(appid, int) or isinstance(appid, bool) or appid <= 0 or appid in seen:
+            raise FriendError('最近游玩游戏编号无效。', 'recent_format')
+        seen.add(appid)
+        try:
+            minutes = int(game['playtime_2weeks'])
+            total = int(game.get('playtime_forever') or 0)
+            if minutes < 0 or total < 0:
+                raise ValueError()
+        except (KeyError, ValueError, TypeError, OverflowError):
+            raise FriendError('最近游玩时长格式无效。', 'recent_format') from None
+        result.append({'appid': appid, 'name': str(game.get('name') or f'App {appid}')[:300],
+                       'playtime_2weeks': minutes, 'playtime_forever': total})
+    return result
+
+
 class Friends:
     def __init__(self, root, on_synced=None):
         self.root = root
@@ -271,12 +300,24 @@ class Friends:
                 except FriendError as error:
                     failures += 1
                     update = {'error': str(error), 'error_code': error.code}
+                if cancel.is_set():
+                    break
+                # Recent activity has independent privacy and availability from owned games.
+                # Keep it separate so borrowed games can appear without inflating library value.
+                try:
+                    recent = recently_played(key, sid)
+                    update.update(recent_games=recent, recent_status='ok', recent_error='',
+                                  recent_error_code='', recent_fetched_at=timestamp())
+                except FriendError as error:
+                    update.update(recent_status='unavailable', recent_error=str(error), recent_error_code=error.code)
                 with self.lock:
                     if cancel.is_set():
                         break
                     person = next(p for p in self.data['people'] if p['steamid'] == sid)
                     if 'games' not in update:
                         update['status'] = 'stale' if person.get('fetched_at') else 'unavailable'
+                    if update['recent_status'] != 'ok' and person.get('recent_fetched_at'):
+                        update['recent_status'] = 'stale'
                     person.update(update)
                     self.job['done'] = index + 1
                     self.data['fetched_at'] = timestamp()
