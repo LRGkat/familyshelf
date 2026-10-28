@@ -147,8 +147,9 @@ class SteamBrowserAuth:
                                 # A timeout may occur after the account page has rendered.
                                 if task['kind'] == 'key' and not read_existing_key(page):
                                     raise AuthError('Steam 官方 Key 页面加载失败。请检查网络后点击“重新打开 / 重试”；也可直接使用已有 Key 连接。') from None
-                            deadline = time.monotonic() + 600
+                            deadline = time.monotonic() + 180
                             unknown_since = time.monotonic()
+                            qr_started = time.monotonic()
                             while time.monotonic() < deadline:
                                 if self.closed.is_set() or task['cancel'].is_set():
                                     raise AuthError('已取消 Steam 连接。')
@@ -185,7 +186,9 @@ class SteamBrowserAuth:
                                         self.capture_qr(page)
                                     except Exception:
                                         pass
-                                    task['progress']('请用 Steam 手机应用扫描下方二维码，并确认此次云端登录。')
+                                    if not self.qr_image() and time.monotonic() - qr_started > 60:
+                                        raise AuthError('Steam 未能加载登录二维码，可能限制了云端网络。请稍后重试；好友榜也可使用已有 API Key 手动连接。')
+                                    task['progress']('请用 Steam 手机应用扫描下方二维码，并确认此次云端登录。' if self.qr_image() else '正在加载 Steam 官方二维码…')
                                 page.wait_for_timeout(1200)
                             else:
                                 raise AuthError('Steam 授权等待超时，请再次连接。')

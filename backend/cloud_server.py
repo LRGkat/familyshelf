@@ -155,10 +155,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == '/api/disconnect':
             app.disconnect(); ok, msg = True, '已清除本次 Steam 认证。'
         elif path == '/api/cancel':
-            app.cancel.set(); ok, msg = True, '正在取消…'
+            app.cancel.set(); app.browser_auth.reset(); ok, msg = True, '正在取消…'
         elif path == '/api/friends/login': ok, msg = app.start_friend_auth()
         elif path == '/api/friends/login/cancel':
-            app.cancel_friend_auth(); ok, msg = True, '已取消自动连接。'
+            app.cancel_friend_auth(); app.browser_auth.reset(); ok, msg = True, '已取消自动连接。'
         elif path == '/api/friends':
             if app.friend_auth['running']:
                 ok, msg = False, '请先完成或取消自动连接。'
